@@ -1,0 +1,13 @@
+# Ignore node modules and build outputs
+**/node_modules/
+**/dist/
+**/coverage/
+
+# Ignore Go build artifacts
+**/bin/
+**/*.exe
+**/*.test
+
+# Ignore local environment files
+.env
+.DS_Store

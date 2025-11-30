@@ -1,0 +1,171 @@
+version: '3.9'
+
+services:
+  # PostgreSQL database for storing metrics and device inventory.
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: cdotrmm
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  # Redis cache for real‑time messaging or caching (not used yet but
+  # provisioned for future services such as alert scheduling and WebSocket
+  # communications).
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  # Ingestion microservice implemented in Node.js.  It depends on the
+  # database being up.  The source code is mounted as a volume for live
+  # development; in production this should be built into the container.
+  ingestion-service:
+    build:
+      context: ../backend/ingestion-service
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgres://postgres:postgres@db:5432/cdotrmm
+      ALERT_SERVICE_URL: http://alert-service:3003/api/alerts
+    depends_on:
+      - db
+      - alert-service
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../backend/ingestion-service:/usr/src/app:ro
+
+  # Alerting service for rule management and notifications.  It reads and
+  # writes alert rules and alerts to the same PostgreSQL database used
+  # by other services.  Optional environment variables for email/SMS/
+  # ITSM integrations can be supplied here or via docker-compose.override.yml.
+  alert-service:
+    build:
+      context: ../backend/alert-service
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3003
+      DATABASE_URL: postgres://postgres:postgres@db:5432/cdotrmm
+      # Uncomment and set these URLs to enable outbound notifications
+      # EMAIL_WEBHOOK_URL: https://example.com/email-webhook
+      # SMS_WEBHOOK_URL: https://example.com/sms-webhook
+      # ITSM_WEBHOOK_URL: https://example.com/itsm-ticket
+    depends_on:
+      - db
+    ports:
+      - "3003:3003"
+    volumes:
+      - ../backend/alert-service:/usr/src/app:ro
+
+  # Device inventory service.  Handles registration and CRUD operations on
+  # devices discovered via agents or network scans.
+  device-service:
+    build:
+      context: ../backend/device-service
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgres://postgres:postgres@db:5432/cdotrmm
+    depends_on:
+      - db
+    ports:
+      - "3001:3001"
+    volumes:
+      - ../backend/device-service:/usr/src/app:ro
+
+  # Network collector service.  Performs SNMP/ICMP/WMI scans of client
+  # networks and registers discovered devices.  It communicates with
+  # device-service to post new devices.
+  network-collector:
+    build:
+      context: ../backend/network-collector
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3002
+      DEVICE_SERVICE_URL: http://device-service:3001/api/devices/register
+      PERFORMANCE_SERVICE_URL: http://performance-service:3006/api/performance
+      # Endpoints for flow data and interface stats; used by the collector to
+      # post NetFlow/sFlow/J‑Flow records and SNMP interface counters.  If
+      # omitted they default to the performance service host with the
+      # appropriate path.
+      FLOW_DATA_URL: http://performance-service:3006/api/flow-data
+      INTERFACE_STATS_URL: http://performance-service:3006/api/interface-stats
+    depends_on:
+      - device-service
+    ports:
+      - "3002:3002"
+    volumes:
+      - ../backend/network-collector:/usr/src/app:ro
+
+  # Automation and workflow service.  Handles creation and execution of
+  # automation workflows triggered by events (e.g. service failures).
+  automation-service:
+    build:
+      context: ../backend/automation-service
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3005
+      DATABASE_URL: postgres://postgres:postgres@db:5432/cdotrmm
+    depends_on:
+      - db
+    ports:
+      - "3005:3005"
+    volumes:
+      - ../backend/automation-service:/usr/src/app:ro
+
+  # Network performance service.  Stores network bandwidth, latency and
+  # packet loss metrics collected by network collectors and provides
+  # aggregated reports for dashboards.
+  performance-service:
+    build:
+      context: ../backend/performance-service
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3006
+      DATABASE_URL: postgres://postgres:postgres@db:5432/cdotrmm
+    depends_on:
+      - db
+    ports:
+      - "3006:3006"
+    volumes:
+      - ../backend/performance-service:/usr/src/app:ro
+
+  # Patch management service.  Handles patch metadata, approvals,
+  # scheduling and status reporting.
+  patch-service:
+    build:
+      context: ../backend/patch-service
+      dockerfile: Dockerfile
+    environment:
+      PORT: 3004
+      DATABASE_URL: postgres://postgres:postgres@db:5432/cdotrmm
+    depends_on:
+      - db
+    ports:
+      - "3004:3004"
+    volumes:
+      - ../backend/patch-service:/usr/src/app:ro
+
+  # Frontend dashboard for network performance.  This Vite/React app
+  # visualises bandwidth, latency, jitter and packet loss across sites
+  # using the performance-service API.  It is built in a two stage
+  # Dockerfile and served via nginx.  The VITE_API_BASE environment
+  # variable tells the app where to find the backend API.
+  network-dashboard:
+    build:
+      context: ../frontend/network-dashboard
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_BASE: http://performance-service:3006
+    depends_on:
+      - performance-service
+    ports:
+      - "3007:80"
+
+volumes:
+  db_data:
